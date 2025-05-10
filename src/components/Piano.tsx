@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 
 interface PianoKey {
   key: string;
@@ -36,9 +36,90 @@ const Piano = () => {
   }>({});
   const [gainNodes, setGainNodes] = useState<{ [key: string]: GainNode }>({});
 
+  // Effects state
+  const [delayNode, setDelayNode] = useState<DelayNode | null>(null);
+  const [reverbNode, setReverbNode] = useState<ConvolverNode | null>(null);
+  const [masterGainNode, setMasterGainNode] = useState<GainNode | null>(null);
+
+  // Effect controls
+  const [delayTime, setDelayTime] = useState<number>(0.3);
+  const [delayFeedback, setDelayFeedback] = useState<number>(0.3);
+  const [reverbLevel, setReverbLevel] = useState<number>(0.3);
+  const [masterVolume, setMasterVolume] = useState<number>(0.7);
+  const [transpose, setTranspose] = useState<number>(0);
+  const [waveform, setWaveform] = useState<OscillatorType>("sine");
+
+  // Effects nodes refs to persist connections
+  const delayFeedbackNode = useRef<GainNode | null>(null);
+  const wetGainNode = useRef<GainNode | null>(null);
+  const dryGainNode = useRef<GainNode | null>(null);
+
   useEffect(() => {
-    setAudioContext(new AudioContext());
+    const ctx = new AudioContext();
+    setAudioContext(ctx);
+
+    // Create master gain node
+    const masterGain = ctx.createGain();
+    masterGain.connect(ctx.destination);
+    masterGain.gain.value = masterVolume;
+    setMasterGainNode(masterGain);
+
+    // Create delay network
+    const delay = ctx.createDelay(2.0);
+    const feedback = ctx.createGain();
+    const wet = ctx.createGain();
+    const dry = ctx.createGain();
+
+    delay.delayTime.value = delayTime;
+    feedback.gain.value = delayFeedback;
+    wet.gain.value = 0.3;
+    dry.gain.value = 0.7;
+
+    // Configure delay network
+    delay.connect(feedback);
+    feedback.connect(delay);
+    delay.connect(wet);
+
+    // Store nodes for later use
+    setDelayNode(delay);
+    delayFeedbackNode.current = feedback;
+    wetGainNode.current = wet;
+    dryGainNode.current = dry;
+
+    // Connect wet and dry to master
+    wet.connect(masterGain);
+    dry.connect(masterGain);
+
+    // Create reverb
+    createReverb(ctx).then((convolver) => {
+      convolver.connect(masterGain);
+      setReverbNode(convolver);
+    });
+
+    return () => {
+      ctx.close();
+    };
   }, []);
+
+  // Create reverb impulse response
+  const createReverb = async (ctx: AudioContext) => {
+    const convolver = ctx.createConvolver();
+
+    // Create impulse response
+    const length = ctx.sampleRate * 3; // 3 seconds
+    const impulse = ctx.createBuffer(2, length, ctx.sampleRate);
+
+    for (let channel = 0; channel < 2; channel++) {
+      const channelData = impulse.getChannelData(channel);
+      for (let i = 0; i < length; i++) {
+        channelData[i] =
+          (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.5));
+      }
+    }
+
+    convolver.buffer = impulse;
+    return convolver;
+  };
 
   const stopNote = useCallback(
     (key: string) => {
@@ -81,16 +162,28 @@ const Piano = () => {
       if (oscillators[key.key]) {
         stopNote(key.key);
       }
-
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
 
+      // Connect through effect chain
       oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
 
-      oscillator.type = "sine";
+      if (dryGainNode.current && wetGainNode.current && delayNode) {
+        gainNode.connect(dryGainNode.current);
+        gainNode.connect(delayNode);
+      } else {
+        gainNode.connect(masterGainNode || audioContext.destination);
+      }
+
+      if (reverbNode) {
+        gainNode.connect(reverbNode);
+      }
+
+      oscillator.type = waveform;
+      // Apply transpose
+      const transposedFreq = key.frequency * Math.pow(2, transpose / 12);
       oscillator.frequency.setValueAtTime(
-        key.frequency,
+        transposedFreq,
         audioContext.currentTime
       );
 
@@ -154,9 +247,148 @@ const Piano = () => {
     e.preventDefault();
     handleMouseUp(key);
   };
+  // Effect parameter handlers
+  const updateDelayTime = useCallback(
+    (value: number) => {
+      setDelayTime(value);
+      if (delayNode) {
+        delayNode.delayTime.setValueAtTime(
+          value,
+          audioContext?.currentTime || 0
+        );
+      }
+    },
+    [delayNode, audioContext]
+  );
+
+  const updateDelayFeedback = useCallback(
+    (value: number) => {
+      setDelayFeedback(value);
+      if (delayFeedbackNode.current) {
+        delayFeedbackNode.current.gain.setValueAtTime(
+          value,
+          audioContext?.currentTime || 0
+        );
+      }
+    },
+    [audioContext]
+  );
+
+  const updateReverbLevel = useCallback(
+    (value: number) => {
+      setReverbLevel(value);
+      if (reverbNode && masterGainNode) {
+        reverbNode.connect(masterGainNode);
+      }
+    },
+    [reverbNode, masterGainNode]
+  );
+
+  const updateMasterVolume = useCallback(
+    (value: number) => {
+      setMasterVolume(value);
+      if (masterGainNode) {
+        masterGainNode.gain.setValueAtTime(
+          value,
+          audioContext?.currentTime || 0
+        );
+      }
+    },
+    [masterGainNode, audioContext]
+  );
 
   return (
     <div className="p-8 select-none">
+      <div className="mb-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Waveform selector */}
+        <div className="p-4 bg-white rounded-lg shadow">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Waveform
+          </label>
+          <select
+            className="w-full p-2 border rounded"
+            value={waveform}
+            onChange={(e) => setWaveform(e.target.value as OscillatorType)}
+          >
+            <option value="sine">Sine</option>
+            <option value="square">Square</option>
+            <option value="sawtooth">Sawtooth</option>
+            <option value="triangle">Triangle</option>
+          </select>
+        </div>
+
+        {/* Transpose control */}
+        <div className="p-4 bg-white rounded-lg shadow">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Transpose: {transpose} semitones
+          </label>
+          <input
+            type="range"
+            min="-12"
+            max="12"
+            value={transpose}
+            onChange={(e) => setTranspose(Number(e.target.value))}
+            className="w-full"
+          />
+        </div>
+
+        {/* Effects controls */}
+        <div className="p-4 bg-white rounded-lg shadow">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Delay: {Math.round(delayTime * 1000)}ms
+          </label>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={delayTime}
+            onChange={(e) => updateDelayTime(Number(e.target.value))}
+            className="w-full mb-4"
+          />
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Feedback: {Math.round(delayFeedback * 100)}%
+          </label>
+          <input
+            type="range"
+            min="0"
+            max="0.9"
+            step="0.01"
+            value={delayFeedback}
+            onChange={(e) => updateDelayFeedback(Number(e.target.value))}
+            className="w-full"
+          />
+        </div>
+
+        {/* Master volume and reverb */}
+        <div className="p-4 bg-white rounded-lg shadow">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Reverb: {Math.round(reverbLevel * 100)}%
+          </label>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={reverbLevel}
+            onChange={(e) => updateReverbLevel(Number(e.target.value))}
+            className="w-full mb-4"
+          />
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Master: {Math.round(masterVolume * 100)}%
+          </label>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={masterVolume}
+            onChange={(e) => updateMasterVolume(Number(e.target.value))}
+            className="w-full"
+          />
+        </div>
+      </div>
+
       <div className="relative inline-flex">
         {PIANO_KEYS.map((key) => (
           <div
