@@ -40,9 +40,47 @@ const Piano = () => {
     setAudioContext(new AudioContext());
   }, []);
 
+  const stopNote = useCallback(
+    (key: string) => {
+      const oscillator = oscillators[key];
+      const gainNode = gainNodes[key];
+
+      if (oscillator && gainNode && audioContext) {
+        gainNode.gain.setValueAtTime(
+          gainNode.gain.value,
+          audioContext.currentTime
+        );
+        gainNode.gain.exponentialRampToValueAtTime(
+          0.001,
+          audioContext.currentTime + 0.1
+        );
+        setTimeout(() => {
+          try {
+            oscillator.stop();
+          } catch (e) {
+            console.warn("Could not stop oscillator:", e);
+          }
+          delete oscillators[key];
+          delete gainNodes[key];
+        }, 100);
+      }
+      setActiveKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    },
+    [audioContext, gainNodes, oscillators]
+  );
+
   const playNote = useCallback(
     (key: PianoKey) => {
-      if (!audioContext || oscillators[key.key]) return;
+      if (!audioContext) return;
+
+      // If the note is already playing, stop it first
+      if (oscillators[key.key]) {
+        stopNote(key.key);
+      }
 
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
@@ -64,39 +102,7 @@ const Piano = () => {
       setGainNodes((prev) => ({ ...prev, [key.key]: gainNode }));
       setActiveKeys((prev) => new Set([...prev, key.key]));
     },
-    [audioContext, oscillators]
-  );
-
-  const stopNote = useCallback(
-    (key: string) => {
-      if (!oscillators[key] || !gainNodes[key]) return;
-
-      gainNodes[key].gain.exponentialRampToValueAtTime(
-        0.01,
-        audioContext?.currentTime! + 0.1
-      );
-      oscillators[key].stop(audioContext?.currentTime! + 0.1);
-
-      setTimeout(() => {
-        setOscillators((prev) => {
-          const newOsc = { ...prev };
-          delete newOsc[key];
-          return newOsc;
-        });
-        setGainNodes((prev) => {
-          const newGain = { ...prev };
-          delete newGain[key];
-          return newGain;
-        });
-      }, 100);
-
-      setActiveKeys((prev) => {
-        const newSet = new Set([...prev]);
-        newSet.delete(key);
-        return newSet;
-      });
-    },
-    [audioContext, oscillators, gainNodes]
+    [audioContext, oscillators, stopNote]
   );
 
   useEffect(() => {
